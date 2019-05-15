@@ -1,8 +1,103 @@
 #include <Arduino.h>
 #include <EEPROM.h>
 #include <Wire.h>
-#include <Adafruit_SI5351.h>
+#include <SPI.h>
 
+// UNO wiring for ADF4351:
+// pin 13 CLK 
+// pin 11 DATA
+// pin 3  LE
+
+// default setting
+#define ADF4351_LE 3
+uint32_t registers[6] =  {0x4580A8, 0x80080C9, 0x4E42, 0x4B3, 0xBC803C, 0x580005} ;
+
+void WriteRegister32(const uint32_t value){
+  digitalWrite(ADF4351_LE, LOW);
+  for (int i = 3; i >= 0; i--)SPI.transfer((value >> 8 * i) & 0xFF);
+  digitalWrite(ADF4351_LE, HIGH);
+  digitalWrite(ADF4351_LE, LOW);
+}
+
+void SetADF4351() {
+  for (int i = 5; i >= 0; i--) WriteRegister32(registers[i]);
+}
+
+float SetADF4351Freq(double Freq,double RefFreqMHz){
+  double RFout,DivRatio,ChannelSpacing = 0.01 ; // 10kHz
+  unsigned int long OutputDivider, IntDivRatio,Frac,Mod;
+  // Modified for readability from code by F1CJN
+  RFout=Freq;
+  switch((long int)Freq*100){
+  default:
+    if(RFout>3000)RFout=3000; // max should be 4400
+    OutputDivider = 1;
+    bitWrite (registers[4], 22, 0);
+    bitWrite (registers[4], 21, 0);
+    bitWrite (registers[4], 20, 0);
+    break;
+  case 110000 ... 219999:
+    OutputDivider = 2;
+    bitWrite (registers[4], 22, 0);
+    bitWrite (registers[4], 21, 0);
+    bitWrite (registers[4], 20, 1);
+    break;
+  case 55000 ... 109999:
+    OutputDivider = 4;
+    bitWrite (registers[4], 22, 0);
+    bitWrite (registers[4], 21, 1);
+    bitWrite (registers[4], 20, 0);
+    break;
+  case 27500 ... 54999:
+    OutputDivider = 8;
+    bitWrite (registers[4], 22, 0);
+    bitWrite (registers[4], 21, 1);
+    bitWrite (registers[4], 20, 1);
+    break;
+  case 13750 ... 27499:
+    OutputDivider = 16;
+    bitWrite (registers[4], 22, 1);
+    bitWrite (registers[4], 21, 0);
+    bitWrite (registers[4], 20, 0);
+    break;
+  case 6875 ... 13749:
+    OutputDivider = 32;
+    bitWrite (registers[4], 22, 1);
+    bitWrite (registers[4], 21, 0);
+    bitWrite (registers[4], 20, 1);
+    break;
+  case 0 ... 6874:
+    if(RFout<35)RFout=35;
+    OutputDivider = 64;
+    bitWrite (registers[4], 22, 1);
+    bitWrite (registers[4], 21, 1);
+    bitWrite (registers[4], 20, 0);
+    break;
+  }
+  
+  DivRatio = RFout * OutputDivider / RefFreqMHz;
+  IntDivRatio = (long int)DivRatio;
+  Mod = RefFreqMHz / ChannelSpacing ;
+  Frac = round( (DivRatio - IntDivRatio ) * Mod );
+  
+  registers[0]  =0;
+  registers[0]  = IntDivRatio << 15;
+  registers[0] += (Frac<< 3);
+  
+  registers[1] = 0;
+  registers[1] = Mod << 3;
+  registers[1] = registers[1] + 1 ; 
+  bitSet (registers[1], 27);
+  
+  bitSet (registers[2], 28); 
+  bitSet (registers[2], 27);
+  bitClear (registers[2], 26); 
+  
+  SetADF4351();
+  return((float)RFout);
+}
+
+#include <Adafruit_SI5351.h>
 Adafruit_SI5351 clockgen = Adafruit_SI5351();
 
 class EEPromRW{
@@ -85,54 +180,29 @@ class EEPromRW{
     return(bilf.f);
   }
  public:
-  void Write_fa(int i){
+  void Write_fa(float i){
     WriteFloat(0,i);
   }
-  int Read_fa(){
+  float Read_fa(){
     return(ReadFloat(0));
   }
-  void Write_fb(int i){
+  void Write_fb(float i){
     WriteFloat(4,i);
   }
-  int Read_fb(){
+  float Read_fb(){
     return(ReadFloat(4));
   }
-  void Write_fc(int i){
+  void Write_fc(float i){
     WriteFloat(8,i);
   }
-  int Read_fc(){
+  float Read_fc(){
     return(ReadFloat(8));
   }
-  /*
-  void WriteByte(byte b){
-    WriteByte(0,b);
-  }
-  byte ReadByte(){
-    return(ReadByte(0));
-  }
-  void WriteInt(int i){
-    WriteInt(1,i);
-  }
-  int ReadInt(){
-    return(ReadInt(1));
-  }
-  void WriteLong(long li){
-    WriteLong(3,li);
-  }
-  long ReadLong(){
-    return(ReadLong(3));
-  }
-  void WriteFloat(float f){
-    WriteFloat(7,f);
-  }
-  float ReadFloat(){
-    return(ReadFloat(7));
-    }*/
   EEPromRW(){}
   ~EEPromRW(){}
 }EEPromRW;
 
-class SerialIO{ // code re-used from S2334
+class SerialIO{ 
  private:
 #define BUFF_LENGTH 20
 #define CHAR_LF 10
@@ -243,8 +313,9 @@ char zz[80];
 void ShowError(){
   SerialIO.PrintString("Error\n");
 }
+
 #define XTAL 25
-float SetupA_PLL(float freq,int div,int frac){
+float SetupB_PLL(float freq,int div,int frac){
   float a,x,n=0;
   a=freq*(float)div/XTAL;
   if(a<20){
@@ -259,7 +330,7 @@ float SetupA_PLL(float freq,int div,int frac){
     clockgen.setupPLL(SI5351_PLL_A, int(a),int(n),frac);
   }
   clockgen.setupMultisynthInt(0, SI5351_PLL_A, div);
-  sprintf(zz,"DIV%d a=%d + %d /%d\n",div,int(a),int(n),frac);
+  sprintf(zz,"B  -  DIV%d a=%d + %d /%d\n",div,int(a),int(n),frac);
   SerialIO.PrintString(zz);
   x  = int(a);
   n=(int)n;
@@ -267,38 +338,35 @@ float SetupA_PLL(float freq,int div,int frac){
   return(x*XTAL/div);
 }
 
-float SetA(float freq){
+float SetB(float freq){
   float f,a;
   a=freq*20/XTAL;
   if(a<50){
-    f=SetupA_PLL(freq,20,25);
+    f=SetupB_PLL(freq,20,25);
   } else {
     a=freq*15/XTAL;
     if(a<50){
-      f=SetupA_PLL(freq,15,33);
+      f=SetupB_PLL(freq,15,33);
     } else {
       a=freq*10/XTAL;
       if(a<50){
-	f=SetupA_PLL(freq,10,20);
+	f=SetupB_PLL(freq,10,20);
       } else {
 	a=freq*8/XTAL;
 	if(a<50){
-	  f=SetupA_PLL(freq,8,25);
+	  f=SetupB_PLL(freq,8,25);
 	} else {
-	  f=SetupA_PLL(freq,6,50);
+	  f=SetupB_PLL(freq,6,50);
 	}
       }
     }
   }
   return(f);
 }
-float SetB(float freq){
-  return(freq);
-}
 
 void ShowFA(float freq){
   float f;
-  EEPromRW.Write_fa(f=SetA(freq));
+  EEPromRW.Write_fa(f=SetADF4351Freq(freq,10));
   Serial.print("FrequencyA=");
   Serial.print(f);
   Serial.println("MHz");
@@ -316,24 +384,46 @@ void ShowFB(float freq){
 void ShowFB(){
   ShowFB(EEPromRW.Read_fb());
 }
+void ShowFC(float freq){
+  float f;
+  // Need to check examples and write code to generate parameters for
+  // second synth channel
+  EEPromRW.Write_fc(f=freq);
+  Serial.print("FrequencyC=");
+  Serial.print(f);
+  Serial.println("MHz");
+}
+void ShowFC(){
+  ShowFC(EEPromRW.Read_fc());
+}
 
 void ShowHelp(){
-  SerialIO.PrintString("\nThis program controls SI5351 DDS frequency.  (dmc - 2019-05-09)\n");
-  SerialIO.PrintString("faNNN.NN<cr> where NNN is the frequency.\n");
-  SerialIO.PrintString("fbNNN.NN<cr> where NNN is the frequency.\n");
+  SerialIO.PrintString("\nThis program controls ADF4351 and SI5351 frequency.\n");
+  SerialIO.PrintString("(dmc - 2019-05-09)\n");
+  SerialIO.PrintString("faNNN.NN<cr> where NNN is the ADF4351 frequency.\n");
+  SerialIO.PrintString("fbNNN.NN<cr> where NNN is the SI5351 frequency 1.\n");
+  //  SerialIO.PrintString("fcNNN.NN<cr> where NNN is the SI5351 frequency 2.\n");
 }
 
 void setup() {
   SerialIO.Init();
-  clockgen.begin();
+
+  pinMode(2, INPUT);               //  monitor lock status, not used yet...
+  pinMode(ADF4351_LE, OUTPUT);     // setup for ADF4351
+  digitalWrite(ADF4351_LE, HIGH);
+  SPI.begin();                      
+  SPI.setDataMode(SPI_MODE0);     
+  SPI.setBitOrder(MSBFIRST);
+  
+  clockgen.begin();    // setup for SI5351 
   clockgen.enableOutputs(true);
 }
 
 void loop() {
   float freq;
   ShowFA();
-  //  ShowFB();
-
+  ShowFB();
+  //  ShowFC();
   do{
     if(SerialIO.CheckSerialIn()){
       switch(SerialIO.GetStringChar0()){
@@ -342,6 +432,8 @@ void loop() {
 	  ShowFA(freq);
 	} else if(SerialIO.CheckMatch("fb",&freq)){
 	  ShowFB(freq);
+	  //	} else if(SerialIO.CheckMatch("fc",&freq)){
+	  //	  ShowFC(freq);
 	} else {
 	  ShowError();
 	}
@@ -350,6 +442,7 @@ void loop() {
 	ShowHelp();
         ShowFA();
         ShowFB();
+	//    ShowFC();
 	break;
       }
     }
